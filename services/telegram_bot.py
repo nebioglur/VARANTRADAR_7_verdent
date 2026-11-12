@@ -1017,22 +1017,43 @@ def notify_sim_trade(symbol: str, action: str, price: float, pnl_pct: float = 0.
     
     clean_sym = symbol.replace('.IS', '').upper()
     display_time = _format_time_header(entry_time, date_str)
-    
+
+    # Gun ici degisim (AL mesaji icin): onceki kapanisa gore %.
+    # Telegram HTML'i renk/yazi boyutu desteklemedigi icin "renk" emoji ile,
+    # "buyuk" vurgu ise ayri satirda kalin blok olarak verilir.
+    _prev_close = None
+    try:
+        _mp = trade.get('morning_price')
+        _ceil = trade.get('ceiling_target')
+        if _mp:
+            _prev_close = float(_mp)
+        elif _ceil:
+            _prev_close = float(_ceil) / 1.10
+    except (TypeError, ValueError):
+        _prev_close = None
+    day_chg = ((price - _prev_close) / _prev_close * 100.0) if _prev_close else None
+
+    def _fmt_chg(pct):
+        if pct is None:
+            return ""
+        arrow = "🟢 📈" if pct >= 0 else "🔴 📉"
+        return f"\n{arrow} <b><u>%{pct:+.2f}</u></b>"
+
     if "AL" in action:
         reentry_note = " (Yeniden Giriş)" if "Yeniden" in action else ""
         text = f"🟢 <b>SİMÜLASYON AL EMRİ{reentry_note}</b> 🟢\n"
-        text += f"⏰ <b>Alış Saati:</b> <code>{display_time}</code>\n"
+        text += f"🕒 <b>Alış Saati:</b> 🟢 <code>{display_time}</code>\n"
         text += "━━━━━━━━━━━━━━━━━━━━\n"
         text += f"📌 <b>HİSSE:</b> <b>#{clean_sym}</b>\n"
-        text += f"💵 <b>Alış Fiyatı:</b> ₺{price:.2f}\n"
-        text += f"📦 <b>Pozisyon:</b> {shares} Lot  (₺{total_val:,.2f})\n"
-        text += f"🏆 <b>Sistem Puanı:</b> {float(trade_score):.0f}/100 (Elit Seçim)\n\n"
+        text += f"💵 <b>Alış Fiyatı:</b> <b>₺{price:.2f}</b>{_fmt_chg(day_chg)}\n"
+        text += f"📦 <b>Pozisyon:</b> <b>{shares} Lot</b>  (<b>₺{total_val:,.2f}</b>)\n"
+        text += f"🏆 <b>Sistem Puanı:</b> <b>{float(trade_score):.0f}/100</b> (Elit Seçim)\n\n"
         
         text += "🎯 <b>HEDEFLER VE RİSK PLANI</b>\n"
         text += "━━━━━━━━━━━━━━━━━━━━\n"
-        text += f"💰 <b>1. Kâr Al (TP1):</b> ₺{tp1:.2f} (<b>+%{tp_pct:.2f}</b>) ➡️ <i>Pozisyonun %{tp1_sell_pct}'i satılır</i>\n"
-        text += f"🎯 <b>2. Kâr Al (TP2):</b> ₺{tp2:.2f} (<b>+%{tp2_pct:.2f}</b>) ➡️ <i>Kalan pozisyon satılır</i>\n"
-        text += f"🛑 <b>Zarar Kes (Stop):</b> ₺{sl:.2f} (<b>-%{sl_pct:.2f}</b>) ➡️ <i>Stop tetiklenince kayma olabilir</i>\n"
+        text += f"💰 <b>1. Kâr Al (TP1):</b> <b>₺{tp1:.2f}</b> (<b>🟢 +%{tp_pct:.2f}</b>) ➡️ <i>Pozisyonun %{tp1_sell_pct}'i satılır</i>\n"
+        text += f"🎯 <b>2. Kâr Al (TP2):</b> <b>₺{tp2:.2f}</b> (<b>🟢 +%{tp2_pct:.2f}</b>) ➡️ <i>Kalan pozisyon satılır</i>\n"
+        text += f"🛑 <b>Zarar Kes (Stop):</b> <b>₺{sl:.2f}</b> (<b>🔴 -%{sl_pct:.2f}</b>) ➡️ <i>Stop tetiklenince kayma olabilir</i>\n"
         text += f"🛡️ <b>TP1 planı:</b> {tp1_plan}\n"
         text += f"⏰ <b>17:50 Disiplini:</b> Gün sonu taşınmaz, 17:50'de %100 nakde geçilir!\n\n"
         
@@ -1056,22 +1077,22 @@ def notify_sim_trade(symbol: str, action: str, price: float, pnl_pct: float = 0.
     elif "TP1" in action:
         pnl_val = trade.get('pnl_val', 0)
         display_exit_time = _format_time_header(exit_time, date_str)
-        display_entry_time = _format_time_header(entry_time, "")
+        display_entry_time = _format_time_header(str(entry_time).replace(' [TP1]', ''), "")
         
         text = f"💰 <b>SİMÜLASYON KÂR AL EMRİ (TP1)</b> 💰\n"
-        text += f"⏰ <b>Kâr Al Saati:</b> <code>{display_exit_time}</code>\n"
+        text += f"🕒 <b>Kâr Al Saati:</b> 🟢 <code>{display_exit_time}</code>\n"
         text += "━━━━━━━━━━━━━━━━━━━━\n"
         text += f"📌 <b>HİSSE:</b> <b>#{clean_sym}</b>\n"
-        text += f"💵 <b>Kâr Alış Fiyatı:</b> ₺{price:.2f} (Alış: ₺{float(entry):.2f})\n"
+        text += f"💵 <b>Kâr Alış Fiyatı:</b> <b>₺{price:.2f}</b> (Alış: <b>₺{float(entry):.2f}</b>){_fmt_chg(((price - float(entry)) / float(entry) * 100.0) if entry else None)}\n"
         if display_entry_time:
-            text += f"🕒 <b>Giriş Saati:</b> {display_entry_time}\n"
-        text += f"📦 <b>Satılan Pozisyon:</b> {shares} Lot (%{tp1_sell_pct} satış)\n\n"
-        
+            text += f"🕒 <b>Giriş Saati:</b> 🟡 {display_entry_time}\n"
+        text += f"📦 <b>Satılan Pozisyon:</b> <b>{shares} Lot</b> (%{tp1_sell_pct} satış)\n\n"
+
         text += "📊 <b>KÂR SONUCU</b>\n"
         text += "━━━━━━━━━━━━━━━━━━━━\n"
-        text += f"🟢 <b>Kilitlenen Kâr:</b> <b>+₺{pnl_val:,.2f}</b>\n"
-        text += f"🟢 <b>Kâr Oranı:</b> <b>+%{pnl_pct:.2f}</b>\n"
-        text += f"🏆 <b>Sistem Puanı:</b> {float(trade_score):.0f}/100\n"
+        text += f"🟢 <b>Kilitlenen Kâr:</b> <b><u>+₺{pnl_val:,.2f}</u></b>\n"
+        text += f"🟢 <b>Kâr Oranı:</b> <b><u>+%{pnl_pct:.2f}</u></b>\n"
+        text += f"🏆 <b>Sistem Puanı:</b> <b>{float(trade_score):.0f}/100</b>\n"
         text += f"🛡️ <b>Kalan Pozisyon:</b> %{remaining_pct}; stop girişin %0,10 üstüne taşındı. Kayma/komisyon nedeniyle zarar ihtimali tamamen sıfır değildir.\n"
         
         text += "\n━━━━━━━━━━━━━━━━━━━━\n"
@@ -1085,19 +1106,19 @@ def notify_sim_trade(symbol: str, action: str, price: float, pnl_pct: float = 0.
         display_entry_time = _format_time_header(entry_time, "")
         
         text = f"🏁 <b>SİMÜLASYON SEANS SONU KAPANIŞ</b> 🏁\n"
-        text += f"⏰ <b>Kapanış Saati:</b> <code>{display_exit_time}</code>\n"
+        text += f"🕒 <b>Kapanış Saati:</b> {emoji} <code>{display_exit_time}</code>\n"
         text += "━━━━━━━━━━━━━━━━━━━━\n"
         text += f"📌 <b>HİSSE:</b> <b>#{clean_sym}</b>\n"
-        text += f"💵 <b>Kapanış Fiyatı:</b> ₺{price:.2f} (Alış: ₺{float(entry):.2f})\n"
+        text += f"💵 <b>Kapanış Fiyatı:</b> <b>₺{price:.2f}</b> (Alış: <b>₺{float(entry):.2f}</b>){_fmt_chg(((price - float(entry)) / float(entry) * 100.0) if entry else None)}\n"
         if display_entry_time:
-            text += f"🕒 <b>Giriş Saati:</b> {display_entry_time}\n"
-        text += f"📦 <b>Kapatılan Lot:</b> {shares} Lot  (₺{total_val:,.2f})\n\n"
+            text += f"🕒 <b>Giriş Saati:</b> 🟡 {display_entry_time}\n"
+        text += f"📦 <b>Kapatılan Lot:</b> <b>{shares} Lot</b>  (<b>₺{total_val:,.2f}</b>)\n\n"
         
         text += "📊 <b>GÜN SONU SONUCU</b>\n"
         text += "━━━━━━━━━━━━━━━━━━━━\n"
         v_sign = "+" if pnl_val >= 0 else ""
-        text += f"{emoji} <b>Net K/Z Tutarı:</b> <b>{v_sign}₺{pnl_val:,.2f}</b>\n"
-        text += f"{emoji} <b>Getiri Oranı:</b> <b>{v_sign}%{pnl_pct:.2f}</b>\n"
+        text += f"{emoji} <b>Net K/Z Tutarı:</b> <b><u>{v_sign}₺{pnl_val:,.2f}</u></b>\n"
+        text += f"{emoji} <b>Getiri Oranı:</b> <b><u>{v_sign}%{pnl_pct:.2f}</u></b>\n"
         text += f"🏷️ <b>Açıklama:</b> <i>17:50 Seans sonu nakite geçiş kuralı uygulandı. Geceye hisse taşınmaz.</i>\n"
         
         text += "\n━━━━━━━━━━━━━━━━━━━━\n"
@@ -1113,20 +1134,20 @@ def notify_sim_trade(symbol: str, action: str, price: float, pnl_pct: float = 0.
         display_entry_time = _format_time_header(entry_time, "")
         
         text = f"{header_title}\n"
-        text += f"⏰ <b>Satış Saati:</b> <code>{display_exit_time}</code>\n"
+        text += f"🕒 <b>Satış Saati:</b> {emoji} <code>{display_exit_time}</code>\n"
         text += "━━━━━━━━━━━━━━━━━━━━\n"
         text += f"📌 <b>HİSSE:</b> <b>#{clean_sym}</b>\n"
-        text += f"💵 <b>Satış Fiyatı:</b> ₺{price:.2f} (Alış: ₺{float(entry):.2f})\n"
+        text += f"💵 <b>Satış Fiyatı:</b> <b>₺{price:.2f}</b> (Alış: <b>₺{float(entry):.2f}</b>){_fmt_chg(((price - float(entry)) / float(entry) * 100.0) if entry else None)}\n"
         if display_entry_time:
-            text += f"🕒 <b>Giriş Saati:</b> {display_entry_time}\n"
-        text += f"📦 <b>Satılan Lot:</b> {shares} Lot  (₺{total_val:,.2f})\n\n"
+            text += f"🕒 <b>Giriş Saati:</b> 🟡 {display_entry_time}\n"
+        text += f"📦 <b>Satılan Lot:</b> <b>{shares} Lot</b>  (<b>₺{total_val:,.2f}</b>)\n\n"
         
         text += "📊 <b>KÂR / ZARAR SONUCU</b>\n"
         text += "━━━━━━━━━━━━━━━━━━━━\n"
         v_sign = "+" if pnl_val >= 0 else ""
-        text += f"{emoji} <b>Net K/Z Tutarı:</b> <b>{v_sign}₺{pnl_val:,.2f}</b>\n"
-        text += f"{emoji} <b>Getiri Oranı:</b> <b>{v_sign}%{pnl_pct:.2f}</b>\n"
-        text += f"🏆 <b>Sistem Puanı:</b> {float(trade_score):.0f}/100\n"
+        text += f"{emoji} <b>Net K/Z Tutarı:</b> <b><u>{v_sign}₺{pnl_val:,.2f}</u></b>\n"
+        text += f"{emoji} <b>Getiri Oranı:</b> <b><u>{v_sign}%{pnl_pct:.2f}</u></b>\n"
+        text += f"🏆 <b>Sistem Puanı:</b> <b>{float(trade_score):.0f}/100</b>\n"
         if reason:
             text += f"🏷️ <b>Çıkış Nedeni:</b> {reason}\n"
             
