@@ -3573,18 +3573,10 @@ def api_simulation_daily_pnl():
                     if is_closed:
                         curr_p = float(exit_p)
                         p_time = str(exit_t)[11:16] if len(str(exit_t)) >= 16 else str(exit_t)
+                        # Kapali islemlerde DB kaydi yetkilidir: seans sonu otomatik
+                        # kapanislarda exit_price P&L'den ters turetildigi icin
+                        # fiyat/lot yeniden hesabi komisyonu cift dusururdu.
                         t["price_status"] = "KAPALI"
-                        if shares > 0 and entry_p > 0 and curr_p > 0:
-                            buy_val = entry_p * shares
-                            sell_val = curr_p * shares
-                            calc_val = (curr_p - entry_p) * shares - (buy_val + sell_val) * 0.0004
-                            calc_pct = calc_val / buy_val * 100 if buy_val > 0 else 0.0
-                            if abs(pnl_val - calc_val) > 0.05 or abs(pnl_pct - calc_pct) > 0.01:
-                                pnl_val = calc_val
-                                pnl_pct = calc_pct
-                                t["pnl_val"] = round(pnl_val, 2)
-                                t["realized_pnl"] = round(pnl_val, 2)
-                                t["pnl_pct"] = round(pnl_pct, 2)
                     else:
                         quote = None
                         c.execute("SELECT timestamp, close FROM market_data WHERE date_str=? AND symbol=? AND interval='5m' ORDER BY timestamp DESC LIMIT 1", (_today_ist, sym))
