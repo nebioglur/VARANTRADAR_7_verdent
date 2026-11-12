@@ -976,7 +976,7 @@ def notify_sim_trade(symbol: str, action: str, price: float, pnl_pct: float = 0.
     trade_score = trade.get("entry_score", trade.get("score", 0))
 
     def _send_once(message: str) -> bool:
-        sent = send_telegram_message(message, force=True)
+        sent = send_telegram_message(message)
         try:
             conn = get_connection()
             try:
@@ -1004,7 +1004,15 @@ def notify_sim_trade(symbol: str, action: str, price: float, pnl_pct: float = 0.
     entry_time = trade.get('entry_time', '')
     exit_time = trade.get('exit_time', '')
     
+    tp2 = trade.get('tp2_price', 0) or (round(price * 1.045, 2) if price else 0)
     tp_pct = ((tp1 - entry) / entry * 100) if tp1 and entry else 0
+    tp2_pct = ((tp2 - entry) / entry * 100) if tp2 and entry else 0
+    tp1_sell_pct = max(0, min(100, int(trade.get('tp1_sell_pct', 60) or 60)))
+    remaining_pct = 100 - tp1_sell_pct
+    tp1_plan = (
+        f"TP1'de %{tp1_sell_pct} satılır; kalan %{remaining_pct} için stop girişin %0,10 üstüne taşınır, kayma/komisyon zararı tamamen sıfırlamayabilir."
+        if tp1_sell_pct else "1 lot nedeniyle TP1 kısmi satış ve stop taşıma uygulanmaz; ilk stop seviyesi korunur."
+    )
     sl_pct = ((entry - sl) / entry * 100) if sl and entry else 0
     
     clean_sym = symbol.replace('.IS', '').upper()
@@ -1022,11 +1030,10 @@ def notify_sim_trade(symbol: str, action: str, price: float, pnl_pct: float = 0.
         
         text += "🎯 <b>HEDEFLER VE RİSK PLANI</b>\n"
         text += "━━━━━━━━━━━━━━━━━━━━\n"
-        tp2 = trade.get('tp2_price', 0) or (round(price * 1.045, 2) if price else 0)
-        text += f"💰 <b>1. Kâr Al (TP1):</b> ₺{tp1:.2f} (<b>+%2.2</b>) ➡️ <i>Yarısı (%50) satılır, stop maliyete çekilir</i>\n"
-        text += f"🎯 <b>2. Kâr Al (TP2):</b> ₺{tp2:.2f} (<b>+%4.5</b>) ➡️ <i>Kalan pozisyon satılır</i>\n"
-        text += f"🛑 <b>Zarar Kes (Stop):</b> ₺{sl:.2f} (<b>-%2.5</b>) ➡️ <i>Kesin disiplin</i>\n"
-        text += f"🛡️ <b>Sıfır Risk:</b> +%1.8 kârda stop maliyet üstüne taşınır\n"
+        text += f"💰 <b>1. Kâr Al (TP1):</b> ₺{tp1:.2f} (<b>+%{tp_pct:.2f}</b>) ➡️ <i>Pozisyonun %{tp1_sell_pct}'i satılır</i>\n"
+        text += f"🎯 <b>2. Kâr Al (TP2):</b> ₺{tp2:.2f} (<b>+%{tp2_pct:.2f}</b>) ➡️ <i>Kalan pozisyon satılır</i>\n"
+        text += f"🛑 <b>Zarar Kes (Stop):</b> ₺{sl:.2f} (<b>-%{sl_pct:.2f}</b>) ➡️ <i>Stop tetiklenince kayma olabilir</i>\n"
+        text += f"🛡️ <b>TP1 planı:</b> {tp1_plan}\n"
         text += f"⏰ <b>17:50 Disiplini:</b> Gün sonu taşınmaz, 17:50'de %100 nakde geçilir!\n\n"
         
         sr_block = _sr_text_block(symbol)
@@ -1058,14 +1065,14 @@ def notify_sim_trade(symbol: str, action: str, price: float, pnl_pct: float = 0.
         text += f"💵 <b>Kâr Alış Fiyatı:</b> ₺{price:.2f} (Alış: ₺{float(entry):.2f})\n"
         if display_entry_time:
             text += f"🕒 <b>Giriş Saati:</b> {display_entry_time}\n"
-        text += f"📦 <b>Satılan Pozisyon:</b> {shares} Lot (%50 Kâr Satışı)\n\n"
+        text += f"📦 <b>Satılan Pozisyon:</b> {shares} Lot (%{tp1_sell_pct} satış)\n\n"
         
         text += "📊 <b>KÂR SONUCU</b>\n"
         text += "━━━━━━━━━━━━━━━━━━━━\n"
         text += f"🟢 <b>Kilitlenen Kâr:</b> <b>+₺{pnl_val:,.2f}</b>\n"
         text += f"🟢 <b>Kâr Oranı:</b> <b>+%{pnl_pct:.2f}</b>\n"
         text += f"🏆 <b>Sistem Puanı:</b> {float(trade_score):.0f}/100\n"
-        text += f"🛡️ <b>Sıfır Risk Stratejisi:</b> <i>Kalan %50 pozisyonun stopu maliyete çekildi, artık bu işlemde risk sıfırdır!</i>\n"
+        text += f"🛡️ <b>Kalan Pozisyon:</b> %{remaining_pct}; stop girişin %0,10 üstüne taşındı. Kayma/komisyon nedeniyle zarar ihtimali tamamen sıfır değildir.\n"
         
         text += "\n━━━━━━━━━━━━━━━━━━━━\n"
         text += "✅ <i>1. Hedefe ulaşıldı, kâr kasaya aktarıldı.</i>"

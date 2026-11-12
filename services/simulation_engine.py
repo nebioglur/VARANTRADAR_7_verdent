@@ -39,6 +39,7 @@ class SimulationEngine:
     def _save_single_trade(self, date_str: str, trade: dict):
         """Her AL/SAT aninda islemi veritabanina dogrudan yazar,
         boylece Telegram bildirimi giden her islem aninda Trade Log'da gorunur."""
+        conn = None
         try:
             conn = get_connection()
             cursor = conn.cursor()
@@ -73,8 +74,16 @@ class SimulationEngine:
             ))
             conn.commit()
             conn.close()
+            return True
         except Exception as e:
+            if conn is not None:
+                try:
+                    conn.rollback()
+                    conn.close()
+                except Exception:
+                    pass
             print(f"[SimEngine] _save_single_trade err {trade.get('symbol')}: {e}")
+            return False
 
     def _save_trades(self, date_str: str, trades: list):
         # Ayni (sembol, giris dakikasi) icin birden fazla cikis bacagi olusabilir
@@ -165,7 +174,7 @@ class SimulationEngine:
                         exit_price = CASE WHEN exit_price IS NOT NULL THEN exit_price WHEN shares > 0 THEN entry_price + (pnl_val / shares) ELSE entry_price END,
                         realized_pnl = pnl_val,
                         exit_reason = CASE
-                            WHEN exit_reason LIKE '%TP1%' THEN '⚖️ KADEMELİ TP1 (%50 SATILDI, STOP MALİYETE ÇEKİLDİ) + SEANS SONU NAKITE GECIS (17:50)'
+                            WHEN exit_reason LIKE '%TP1%' THEN '⚖️ KADEMELİ TP1 (%60 SATILDI, STOP GİRİŞİN %0,10 ÜSTÜNE TAŞINDI) + SEANS SONU NAKITE GECIS (17:50)'
                             ELSE 'SEANS SONU NAKITE GECIS (17:50)'
                         END
                     WHERE owner=? AND date_str=? AND exit_time IS NULL
@@ -810,11 +819,12 @@ class SimulationEngine:
             conn_chk = get_connection()
             cur_chk = conn_chk.cursor()
             cur_chk.execute(
-                "SELECT symbol, entry_time, entry_price, shares, exit_time FROM trades WHERE owner=? AND date_str=?",
+                "SELECT symbol, entry_time, entry_price, shares, exit_time FROM trades "
+                "WHERE owner=? AND date_str=? AND entry_time NOT LIKE '%[TP1]%' ORDER BY entry_time ASC",
                 (self.owner, date_str)
             )
             for er in cur_chk.fetchall():
-                existing_today_trades[er['symbol']] = dict(er)
+                existing_today_trades.setdefault(er['symbol'], dict(er))
             conn_chk.close()
         except Exception:
             pass
@@ -1022,11 +1032,17 @@ class SimulationEngine:
                     # Boga/yuksek volatilitede erken ve buyuk kisim satilir (kasa guvenligi),
                     # guclu bogada runner payi buyur (tavan potansiyeli).
                     trade['scaled_out'] = True
-                    # KATI ASİMETRİK KÂR KİLİDİ: TP1'de en az %60 satılarak kâr kilitlenir!
-                    _tp1_pct = 60
-                    out_shares = max(1, int(round(trade['shares'] * _tp1_pct / 100.0)))
-                    if out_shares >= trade['shares']:
-                        out_shares = max(1, trade['shares'] - 1)
+                    # Hedef kismi satis %60'tir; tam lot yuvarlamasi nedeniyle gercek oran trade kaydinda tutulur.
+                    shares_before_tp1 = int(trade['shares'])
+                    planned_out_shares = trade.get('tp1_sell_shares')
+                    if planned_out_shares is None:
+                        planned_out_shares = max(1, int(round(shares_before_tp1 * 0.60))) if shares_before_tp1 > 1 else 0
+                    out_shares = int(planned_out_shares)
+                    if shares_before_tp1 > 1:
+                        out_shares = min(shares_before_tp1 - 1, out_shares)
+                    else:
+                        out_shares = 0
+                    _tp1_pct = int(round(out_shares / shares_before_tp1 * 100.0)) if shares_before_tp1 > 0 else 0
                     if out_shares > 0:
                         trade['shares'] -= out_shares
                         scale_out_price = round(tp1_price * 0.9985, 2)
@@ -1046,6 +1062,7 @@ class SimulationEngine:
                             'shares': out_shares,
                             'exit_time': str(current_time),
                             'exit_price': scale_out_price,
+                            'tp1_sell_pct': _tp1_pct,
                             'pnl_val': net_profit,
                             'pnl_pct': (net_profit / buy_vol * 100) if buy_vol > 0 else 0.0,
                             'exit_reason': f"⚖️ KADEMELİ TP1 (%{_tp1_pct} SATILDI, STOP MALİYETE ÇEKİLDİ)",
@@ -1059,17 +1076,17 @@ class SimulationEngine:
 
                         completed_trades[-1]['owner'] = self.owner
                         completed_trades[-1]['engine_version'] = trade.get('engine_version', 'V8_ELITE')
-                        self._save_single_trade(str(current_time)[:10], completed_trades[-1])
-
-                        # Telegram: TP1 otomatik kismi kâr alma emri bildirimi (atomik dedup korumalı)
-                        try:
-                            from services.telegram_bot import notify_sim_trade
-                            notify_sim_trade(sym, "SAT (TP1)", scale_out_price,
-                                         (net_profit / buy_vol * 100) if buy_vol > 0 else 0.0,
-                                         f"⚖️ TP1: %{_tp1_pct} kâr alındı, stop maliyete çekildi (risk-free)",
-                                         str(current_time)[:10], completed_trades[-1])
-                        except Exception:
-                            pass
+                        if self._save_single_trade(str(current_time)[:10], completed_trades[-1]):
+                            try:
+                                from services.telegram_bot import notify_sim_trade
+                                notify_sim_trade(sym, "SAT (TP1)", scale_out_price,
+                                             (net_profit / buy_vol * 100) if buy_vol > 0 else 0.0,
+                                             f"⚖️ TP1: %{_tp1_pct} kâr alındı, kalan pozisyon stopu girişin %0,10 üstüne taşındı (kayma riski sürer)",
+                                             str(current_time)[:10], completed_trades[-1])
+                            except Exception as alert_error:
+                                print(f"[SimEngine] TP1 Telegram hatası {sym}: {alert_error}")
+                        else:
+                            print(f"[SimEngine] TP1 Telegram atlandı; trade kaydı başarısız: {sym}")
                             
                 if sell_price is not None:
                     trade['status'] = 'CLOSED'
@@ -1091,12 +1108,14 @@ class SimulationEngine:
                     trade['owner'] = self.owner
                     trade['engine_version'] = trade.get('engine_version', 'V8_ELITE')
                     completed_trades.append(trade)
-                    self._save_single_trade(str(current_time)[:10], trade)
-                    try:
-                        from services.telegram_bot import notify_sim_trade
-                        notify_sim_trade(sym, "SAT", sell_price, trade["pnl_pct"], reason, str(current_time)[:10], trade)
-                    except Exception:
-                        pass
+                    if self._save_single_trade(str(current_time)[:10], trade):
+                        try:
+                            from services.telegram_bot import notify_sim_trade
+                            notify_sim_trade(sym, "SAT", sell_price, trade["pnl_pct"], reason, str(current_time)[:10], trade)
+                        except Exception as alert_error:
+                            print(f"[SimEngine] SAT Telegram hatası {sym}: {alert_error}")
+                    else:
+                        print(f"[SimEngine] SAT Telegram atlandı; trade kaydı başarısız: {sym}")
                     
                     if "STOP" in reason:
                         stopped_out_symbols.add(sym)
@@ -1257,6 +1276,11 @@ class SimulationEngine:
                     to_remove.append(s)
                     continue
 
+                tp1_sell_shares = max(1, int(round(shares * 0.60))) if shares > 1 else 0
+                if shares > 1:
+                    tp1_sell_shares = min(shares - 1, tp1_sell_shares)
+                tp1_sell_pct = int(round(tp1_sell_shares / shares * 100.0)) if shares > 0 else 0
+
                 current_cash -= (shares * entry_price) * 1.0004
                 traded_today_symbols.add(sym)
 
@@ -1279,6 +1303,8 @@ class SimulationEngine:
                     'ceiling_target': ceiling,
                     'stop_price': setup['stop_price'],
                     'tp1_price': tp1_price,
+                    'tp1_sell_shares': tp1_sell_shares,
+                    'tp1_sell_pct': tp1_sell_pct,
                     'tp2_price': tp2_price,
                     'shares': shares,
                     'status': 'OPEN',
@@ -1297,12 +1323,14 @@ class SimulationEngine:
                 open_symbols.add(sym)
                 available_slots -= 1
                 entries_in_this_bar += 1
-                self._save_single_trade(str(current_time)[:10], trade_entry)
-                try:
-                    from services.telegram_bot import notify_sim_trade
-                    notify_sim_trade(sym, 'AL', entry_price, 0.0, f'Sistem AL verdi{sec_tag}', str(current_time)[:10], trade_entry)
-                except Exception:
-                    pass
+                if self._save_single_trade(str(current_time)[:10], trade_entry):
+                    try:
+                        from services.telegram_bot import notify_sim_trade
+                        notify_sim_trade(sym, 'AL', entry_price, 0.0, f'Sistem AL verdi{sec_tag}', str(current_time)[:10], trade_entry)
+                    except Exception as alert_error:
+                        print(f"[SimEngine] AL Telegram hatası {sym}: {alert_error}")
+                else:
+                    print(f"[SimEngine] AL Telegram atlandı; trade kaydı başarısız: {sym}")
                 to_remove.append(s)
 
             for s in to_remove:
@@ -1398,12 +1426,14 @@ class SimulationEngine:
                     trade['exit_reason'] = 'SEANS SONU NAKITE GECIS (17:50)'
                     trade['owner'] = self.owner
                     trade['engine_version'] = trade.get('engine_version', 'V8_ELITE')
-                    self._save_single_trade(str(last_time)[:10], trade)
-                    try:
-                        from services.telegram_bot import notify_sim_trade
-                        notify_sim_trade(sym, "SAT (GUN SONU)", eod_sell_price, trade["pnl_pct"], "17:50 Otomatik Kapanis", str(last_time)[:10], trade)
-                    except Exception:
-                        pass
+                    if self._save_single_trade(str(last_time)[:10], trade):
+                        try:
+                            from services.telegram_bot import notify_sim_trade
+                            notify_sim_trade(sym, "SAT (GUN SONU)", eod_sell_price, trade["pnl_pct"], "17:50 Otomatik Kapanis", str(last_time)[:10], trade)
+                        except Exception as alert_error:
+                            print(f"[SimEngine] Gün sonu Telegram hatası {sym}: {alert_error}")
+                    else:
+                        print(f"[SimEngine] Gün sonu Telegram atlandı; trade kaydı başarısız: {sym}")
                 else:
                     trade['exit_time'] = None
                     trade['exit_price'] = None
@@ -1434,19 +1464,9 @@ class SimulationEngine:
                 completed_trades.append(trade)
 
         self._save_trades(date_str, completed_trades)
-        try:
-            conn_cln = get_connection()
-            cur_cln = conn_cln.cursor()
-            cur_cln.execute("""
-                DELETE FROM trades 
-                WHERE owner = ? AND date_str = ? AND rowid NOT IN (
-                    SELECT MIN(rowid) FROM trades WHERE owner = ? AND date_str = ? GROUP BY symbol
-                )
-            """, (self.owner, date_str, self.owner, date_str))
-            conn_cln.commit()
-            conn_cln.close()
-        except Exception:
-            pass
+        # Her pozisyon ve her TP/SL ayağı ayrı event-key ile saklanır. Sembol
+        # bazında cleanup yapılması aynı hissedeki TP1/kalan lot/yeniden giriş
+        # kayıtlarını siliyordu; trade log artık hiçbir satırı otomatik silmez.
         print(f"[SimEngine] {date_str} için ÇELİK SİSTEM tamamlandı. İşlem Sayısı: {len(completed_trades)}")
 
         # Seans sonu: Nakde geçiş tamamlandıktan sonra gün sonu detaylı kâr/zarar tablosu ve hisseler Telegram'a otomatik gönderilir
