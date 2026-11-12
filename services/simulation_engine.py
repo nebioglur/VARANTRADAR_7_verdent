@@ -886,6 +886,8 @@ class SimulationEngine:
                             'Volume': 50000 + int(_i * 1000)
                         })
                     df = pd.DataFrame(_bars, index=[pd.to_datetime(f'{date_str} {t}') for t in _all_day_times])
+                    # Sentetik barlar: gercek piyasa verisi DEGILDIR, uzerinde pozisyon ACILMAZ
+                    df.attrs['synthetic_times'] = set(df.index)
             elif _is_today and getattr(df.index, '__len__', lambda: 0)() > 0:
                 # Eğer indirilen barlar gün ortasında (örn 10:20'de) kesilmişse, seans saatine kadar uzat
                 last_dt = df.index[-1]
@@ -910,6 +912,9 @@ class SimulationEngine:
                         })
                     ext_df = pd.DataFrame(_ext_bars, index=[pd.to_datetime(f'{date_str} {t}') for t in missing_times])
                     df = pd.concat([df, ext_df])
+                    # Uzatilan bolum sentetiktir: gercek fiyat hareketi degil, interpolasyondur.
+                    # Bu barlarda ASLA yeni pozisyon acilmaz (KRDMD 39,81 hatasinin kok nedeni).
+                    df.attrs['synthetic_times'] = set(pd.to_datetime([f'{date_str} {t}' for t in missing_times]))
 
             if not df.empty:
                 # Karma tz verisi: Postgres timestamp'leri tz-aware, yfinance
@@ -1222,6 +1227,25 @@ class SimulationEngine:
                 if df is None or current_time not in df.index:
                     continue
 
+                # === VERI GUVENLIGI KALKANI (KRDMD/SKYMD hatasinin kok cozumu) ===
+                # 1) Sentetik (uydurma/interpolasyon) bar uzerinde ASLA pozisyon acilmaz.
+                _syn_times = df.attrs.get('synthetic_times')
+                if _syn_times and current_time in _syn_times:
+                    continue
+                # 2) Tazelik: canlı günde barin yasi 10 dakikadan fazlaysa giris yapilmaz.
+                #    Yahoo gecikmesi / 429 ban korumasi sonrasi saatler oncesinden kalan
+                #    bayat barlarla islem acilmasini engeller.
+                try:
+                    from zoneinfo import ZoneInfo as _ZI
+                    _rt_now = datetime.now(_ZI('Europe/Istanbul')).replace(tzinfo=None)
+                except Exception:
+                    _rt_now = datetime.now()
+                if date_str == _rt_now.strftime('%Y-%m-%d'):
+                    _bar_age_min = (_rt_now - dt_current).total_seconds() / 60.0
+                    if _bar_age_min > 10.0:
+                        print(f"[SimEngine] STALE DATA: {sym} bar {dt_current} ({_bar_age_min:.0f} dk eski) - giris atlandi")
+                        continue
+
                 from datetime import datetime as _dt_cls
                 today_now_str = _dt_cls.now().strftime('%Y-%m-%d')
                 is_live_today = (date_str == today_now_str and current_time.time() < time(17, 30))
@@ -1238,6 +1262,16 @@ class SimulationEngine:
                 prev_close = (ceiling / 1.10) if ceiling > 0 else raw_entry
                 current_ch = ((raw_entry - prev_close) / prev_close * 100.0) if prev_close > 0 else 0.0
                 if current_ch >= 5.5 or (ceiling > 0 and raw_entry >= ceiling * 0.96):
+                    to_remove.append(s)
+                    continue
+
+                # 3) Tutarlilik denetimi: sinyalin bildirdigi degisim ile bar verisinden
+                #    hesaplanan degisim 2.5 puandan fazla ayrisiyorsa veri guvenilmezdir
+                #    (SKYMD +%3,42 vs gercek -%9 vakasi). Girise izin verilmez.
+                _m_sig = s.get('_metadata') or {}
+                _sig_ch = float(_m_sig.get('Change_Pct') or _m_sig.get('Change') or s.get('Change_Pct') or 0.0)
+                if ceiling > 0 and abs(current_ch - _sig_ch) > 2.5:
+                    print(f"[SimEngine] SIGNAL MISMATCH: {sym} sinyal %{_sig_ch:.2f} vs bar %{current_ch:.2f} - giris engellendi")
                     to_remove.append(s)
                     continue
 

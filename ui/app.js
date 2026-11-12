@@ -363,6 +363,7 @@ function switchMainTab(tabName, btnElement) {
     
     const simWrapper = document.getElementById('simulation-wrapper');
     if (simWrapper) simWrapper.style.display = tabName === 'simulation' ? 'block' : 'none';
+    if (tabName === 'simulation') loadSimLiveData();
 
     const pfWrapper = document.getElementById('portfolio-wrapper');
     if (pfWrapper) pfWrapper.style.display = tabName === 'portfolio' ? 'block' : 'none';
@@ -5817,7 +5818,46 @@ setInterval(() => {
         ltRefreshResetUI();
         fetchAdminResetRequests();
     }
+    if (simVisible) loadSimLiveData();
 }, 30000);
+
+// ========== CANLI BIST VERİ İZLEME (Sistemin gördüğü fiyat/veri yaşı) ==========
+async function loadSimLiveData() {
+    const tbody = document.getElementById('sim-live-data-tbody');
+    if (!tbody) return;
+    try {
+        const res = await vrAuthorizedFetch('/api/simulation/live_data?t=' + Date.now());
+        const data = await res.json();
+        const timeEl = document.getElementById('sim-live-server-time');
+        if (timeEl && data.server_time) timeEl.textContent = data.server_time;
+        const rows = data.symbols || [];
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-muted); padding:14px;">Bugün için değerlendirilen sembol bulunamadı.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = rows.map(r => {
+            const ch = r.live_change;
+            const chColor = ch == null ? 'var(--text-muted)' : (ch >= 0 ? '#10b981' : '#ef4444');
+            const chTxt = ch == null ? '-' : (ch >= 0 ? '+' : '') + ch.toFixed(2) + '%';
+            const sigTxt = r.signal_change == null ? '-' : (r.signal_change >= 0 ? '+' : '') + Number(r.signal_change).toFixed(2) + '%';
+            const statusColor = r.status === 'TAZE' ? '#10b981' : (r.status === 'GECİKMELİ' ? '#f59e0b' : (r.status === 'BAYAT' ? '#ef4444' : 'var(--text-muted)'));
+            const ageTxt = r.age_min == null ? '-' : r.age_min.toFixed(0) + ' dk';
+            const ageColor = r.age_min == null ? 'var(--text-muted)' : (r.age_min <= 10 ? '#10b981' : (r.age_min <= 30 ? '#f59e0b' : '#ef4444'));
+            const posBadge = r.has_position ? ' <span style="font-size:0.65rem; background:rgba(16,185,129,0.2); color:#10b981; padding:1px 6px; border-radius:8px; border:1px solid rgba(16,185,129,0.4);">POZİSYON</span>' : '';
+            return `<tr style="border-bottom:1px solid var(--border-color); ${r.status === 'BAYAT' ? 'background:rgba(239,68,68,0.06);' : ''}">
+                <td style="padding:8px 10px; font-weight:800; color:var(--text-main);">${r.symbol}${posBadge}</td>
+                <td style="padding:8px 10px; font-weight:700; color:var(--text-main);">${r.last_price != null ? r.last_price.toFixed(2) + ' ₺' : '-'}</td>
+                <td style="padding:8px 10px; font-weight:900; font-size:0.95rem; color:${chColor};">${chTxt}</td>
+                <td style="padding:8px 10px; color:var(--text-muted);">${sigTxt}</td>
+                <td style="padding:8px 10px; font-weight:700; color:#22d3ee;">${r.bar_time || '-'}</td>
+                <td style="padding:8px 10px; font-weight:800; color:${ageColor};">${ageTxt}</td>
+                <td style="padding:8px 10px;"><span style="font-weight:800; font-size:0.72rem; padding:2px 8px; border-radius:10px; border:1px solid ${statusColor}; color:${statusColor};">${r.status}</span></td>
+            </tr>`;
+        }).join('');
+    } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-muted); padding:14px;">Veri alınamadı, yeniden denenecek...</td></tr>';
+    }
+}
 
 setInterval(() => {
     const wrapper = document.getElementById('simulation-wrapper');

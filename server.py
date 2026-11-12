@@ -3984,6 +3984,85 @@ def api_simulation_send_telegram():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.route('/api/simulation/live_data', methods=['GET'])
+def api_simulation_live_data():
+    """Simülasyon motorunun değerlendirdiği BIST sembollerinin canlı fiyat / veri yaşı tablosu."""
+    try:
+        from datetime import datetime, time as _dtime
+        try:
+            from zoneinfo import ZoneInfo
+            now_ist = datetime.now(ZoneInfo("Europe/Istanbul"))
+        except Exception:
+            now_ist = datetime.now()
+        date_str = request.args.get('date') or now_ist.strftime("%Y-%m-%d")
+        owner = get_owner_key()
+        from services.trade_database import get_connection, SmartRow
+        rows = []
+        with get_connection() as conn:
+            conn.row_factory = SmartRow
+            c = conn.cursor()
+            c.execute("SELECT symbol, score, morning_price, ceiling_target, metadata FROM signals WHERE date_str=? ORDER BY score DESC", (date_str,))
+            sig_map = {}
+            for r in c.fetchall():
+                d = dict(r)
+                try:
+                    _md = json.loads(d.get('metadata') or '{}')
+                except Exception:
+                    _md = {}
+                d['_sig_change'] = _md.get('Change_Pct', _md.get('Change'))
+                sig_map[d['symbol']] = d
+            c.execute("SELECT DISTINCT symbol FROM trades WHERE owner=? AND exit_time IS NULL", (owner,))
+            open_syms = [r['symbol'] for r in c.fetchall()]
+            symbols = list(dict.fromkeys(list(sig_map.keys()) + open_syms))
+            in_session = _dtime(10, 0) <= now_ist.time() < _dtime(18, 0)
+            for sym in symbols:
+                sig = sig_map.get(sym, {})
+                morning_p = float(sig.get('morning_price') or 0)
+                sig_ch = float(sig.get('_sig_change') or 0)
+                c.execute("SELECT timestamp, close FROM market_data WHERE date_str=? AND symbol=? ORDER BY timestamp DESC LIMIT 1", (date_str, sym))
+                bar = c.fetchone()
+                if not bar:
+                    rows.append({
+                        "symbol": sym, "score": sig.get('score'), "signal_change": round(sig_ch, 2),
+                        "last_price": None, "bar_time": None, "age_min": None,
+                        "status": "VERİ YOK", "has_position": sym in open_syms
+                    })
+                    continue
+                last_close = float(bar['close'])
+                try:
+                    ts = datetime.fromisoformat(str(bar['timestamp']))
+                    if ts.tzinfo is not None:
+                        from zoneinfo import ZoneInfo as _ZI2
+                        ts = ts.astimezone(_ZI2("Europe/Istanbul")).replace(tzinfo=None)
+                except Exception:
+                    ts = None
+                age_min = None
+                if ts is not None:
+                    age_min = (now_ist.replace(tzinfo=None) - ts).total_seconds() / 60.0
+                live_ch = ((last_close - morning_p) / morning_p * 100.0) if morning_p > 0 else None
+                if not in_session or ts is None:
+                    status = "SEANS DIŞI" if not in_session else "VERİ YOK"
+                elif age_min <= 10:
+                    status = "TAZE"
+                elif age_min <= 30:
+                    status = "GECİKMELİ"
+                else:
+                    status = "BAYAT"
+                rows.append({
+                    "symbol": sym, "score": sig.get('score'), "signal_change": round(sig_ch, 2),
+                    "last_price": round(last_close, 2),
+                    "live_change": round(live_ch, 2) if live_ch is not None else None,
+                    "bar_time": ts.strftime("%H:%M") if ts is not None else None,
+                    "age_min": round(age_min, 1) if age_min is not None else None,
+                    "status": status, "has_position": sym in open_syms
+                })
+        rows.sort(key=lambda r: (r.get("age_min") is None, r.get("age_min") or 0))
+        return jsonify({"status": "success", "date": date_str, "server_time": now_ist.strftime("%H:%M:%S"), "symbols": rows})
+    except Exception as e:
+        logging.exception("api_simulation_live_data error")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 import time
 XU100_CACHE = {"change": 0.0, "last_updated": 0}
 
