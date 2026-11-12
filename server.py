@@ -3573,45 +3573,61 @@ def api_simulation_daily_pnl():
                     if is_closed:
                         curr_p = float(exit_p)
                         p_time = str(exit_t)[11:16] if len(str(exit_t)) >= 16 else str(exit_t)
-                        # Matematiksel Tutarlılık Kalkanı: Giriş ile çıkış farklıyken pnl_val 0 kalmışsa düzelt
+                        t["price_status"] = "KAPALI"
                         if shares > 0 and entry_p > 0 and curr_p > 0:
-                            calc_val = (curr_p - entry_p) * shares
-                            calc_pct = ((curr_p - entry_p) / entry_p) * 100.0
-                            if abs(pnl_val) < 0.01 and abs(curr_p - entry_p) > 0.001:
+                            buy_val = entry_p * shares
+                            sell_val = curr_p * shares
+                            calc_val = (curr_p - entry_p) * shares - (buy_val + sell_val) * 0.0004
+                            calc_pct = calc_val / buy_val * 100 if buy_val > 0 else 0.0
+                            if abs(pnl_val - calc_val) > 0.05 or abs(pnl_pct - calc_pct) > 0.01:
                                 pnl_val = calc_val
                                 pnl_pct = calc_pct
                                 t["pnl_val"] = round(pnl_val, 2)
                                 t["realized_pnl"] = round(pnl_val, 2)
                                 t["pnl_pct"] = round(pnl_pct, 2)
-                            elif abs(pnl_val - calc_val) <= shares * 0.011 and "TP1" not in str(t.get("exit_reason") or ""):
-                                # Eski kayitlarda cikis fiyati 2 haneye yuvarlanmisken pnl ham
-                                # fiyattan hesaplandigi icin birkac liralik fark kalabilir;
-                                # gosterimde kayitli fiyatlara gore uzlastir (yuvarlama artifakti).
-                                # Boylece her satir paddingsiz "lot x (cikis - giris)" ile
-                                # elle dogrulanabilir hale gelir.
-                                t["pnl_val"] = round(calc_val, 2)
-                                t["pnl_pct"] = round(calc_pct, 2)
                     else:
-                        st_p = float(st.get("Price") or st.get("Daily_Close") or 0.0)
-                        if st_p > 0:
-                            curr_p = st_p
-                            if shares > 0 and entry_p > 0:
-                                pnl_val = (curr_p - entry_p) * shares
-                                pnl_pct = ((curr_p - entry_p) / entry_p) * 100.0
+                        quote = None
+                        c.execute("SELECT timestamp, close FROM market_data WHERE date_str=? AND symbol=? AND interval='5m' ORDER BY timestamp DESC LIMIT 1", (_today_ist, sym))
+                        quote = c.fetchone()
+                        quote_time = None
+                        quote_age_min = None
+                        if quote:
+                            try:
+                                quote_time = _dt_cls.fromisoformat(str(quote['timestamp']))
+                                if quote_time.tzinfo is not None:
+                                    from zoneinfo import ZoneInfo as _ZI_quote
+                                    quote_time = quote_time.astimezone(_ZI_quote("Europe/Istanbul")).replace(tzinfo=None)
+                                quote_age_min = (_now_ist.replace(tzinfo=None) - quote_time).total_seconds() / 60.0
+                            except Exception:
+                                quote_time = None
+                        if quote and quote_time is not None:
+                            curr_p = float(quote['close'])
+                            p_time = quote_time.strftime("%H:%M")
+                            t["price_age_min"] = round(quote_age_min, 1)
+                            t["price_status"] = "TAZE" if 0 <= quote_age_min <= 10 else ("GECİKMELİ" if 10 < quote_age_min <= 30 else "BAYAT")
+                            if shares > 0 and entry_p > 0 and 0 <= quote_age_min <= 10:
+                                pnl_val = (curr_p - entry_p) * shares - ((entry_p + curr_p) * shares * 0.0004)
+                                pnl_pct = pnl_val / (entry_p * shares) * 100
                                 t["pnl_val"] = round(pnl_val, 2)
                                 t["pnl_pct"] = round(pnl_pct, 2)
-                        elif shares > 0 and entry_p > 0:
-                            curr_p = entry_p + (pnl_val / shares)
-                        elif entry_p > 0 and pnl_pct != 0:
-                            curr_p = entry_p * (1.0 + (pnl_pct / 100.0))
                         else:
+                            t["price_status"] = "VERİ YOK"
+                            curr_p = float(t.get("current_price") or entry_p)
+                            p_time = "-"
+                        if quote is None:
+                            st_p = float(st.get("Price") or st.get("Daily_Close") or 0.0)
+                            if st_p > 0:
+                                curr_p = st_p
+                                t["price_status"] = "KAYNAK ZAMANI BELİRSİZ"
+                                if shares > 0 and entry_p > 0:
+                                    pnl_val = (curr_p - entry_p) * shares
+                                    pnl_pct = ((curr_p - entry_p) / entry_p) * 100.0
+                                    t["pnl_val"] = round(pnl_val, 2)
+                                    t["pnl_pct"] = round(pnl_pct, 2)
+                            st_time = st.get("Time")
+                            p_time = str(st_time).strip()[:5] if st_time and str(st_time).strip() != "-" else last_sync_time
+                        if (not quote) and curr_p <= 0:
                             curr_p = entry_p
-
-                        st_time = st.get("Time")
-                        if st_time and str(st_time).strip() != "-" and len(str(st_time).strip()) >= 4:
-                            p_time = str(st_time).strip()[:5]
-                        else:
-                            p_time = last_sync_time
 
                     t["current_price"] = round(curr_p, 2)
                     t["price_time"] = p_time
@@ -4019,12 +4035,12 @@ def api_simulation_live_data():
                 sig = sig_map.get(sym, {})
                 morning_p = float(sig.get('morning_price') or 0)
                 sig_ch = float(sig.get('_sig_change') or 0)
-                c.execute("SELECT timestamp, close FROM market_data WHERE date_str=? AND symbol=? ORDER BY timestamp DESC LIMIT 1", (date_str, sym))
+                c.execute("SELECT timestamp, close, source FROM market_data WHERE date_str=? AND symbol=? AND interval='5m' ORDER BY timestamp DESC LIMIT 1", (date_str, sym))
                 bar = c.fetchone()
                 if not bar:
                     rows.append({
                         "symbol": sym, "score": sig.get('score'), "signal_change": round(sig_ch, 2),
-                        "last_price": None, "bar_time": None, "age_min": None,
+                        "last_price": None, "bar_time": None, "age_min": None, "source": None,
                         "status": "VERİ YOK", "has_position": sym in open_syms
                     })
                     continue
@@ -4042,9 +4058,9 @@ def api_simulation_live_data():
                 live_ch = ((last_close - morning_p) / morning_p * 100.0) if morning_p > 0 else None
                 if not in_session or ts is None:
                     status = "SEANS DIŞI" if not in_session else "VERİ YOK"
-                elif age_min <= 10:
+                elif 0 <= age_min <= 10:
                     status = "TAZE"
-                elif age_min <= 30:
+                elif 10 < age_min <= 30:
                     status = "GECİKMELİ"
                 else:
                     status = "BAYAT"
@@ -4054,6 +4070,7 @@ def api_simulation_live_data():
                     "live_change": round(live_ch, 2) if live_ch is not None else None,
                     "bar_time": ts.strftime("%H:%M") if ts is not None else None,
                     "age_min": round(age_min, 1) if age_min is not None else None,
+                    "source": bar['source'],
                     "status": status, "has_position": sym in open_syms
                 })
         rows.sort(key=lambda r: (r.get("age_min") is None, r.get("age_min") or 0))

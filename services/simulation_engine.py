@@ -36,9 +36,41 @@ class SimulationEngine:
                 cls._owner_locks[owner] = lock
             return lock
 
+    def _is_trusted_market_bar(self, df, bar_time, date_str, now_ist=None):
+        """False for generated bars or live-session bars older than ten minutes."""
+        synthetic_times = df.attrs.get('synthetic_times') or set()
+        if bar_time in synthetic_times:
+            return False
+        if now_ist is None:
+            try:
+                from zoneinfo import ZoneInfo
+                now_ist = datetime.now(ZoneInfo('Europe/Istanbul'))
+            except Exception:
+                now_ist = datetime.now()
+        if date_str != now_ist.strftime('%Y-%m-%d'):
+            return True
+        bar_dt = pd.Timestamp(bar_time)
+        if bar_dt.tzinfo is not None:
+            bar_dt = bar_dt.tz_convert('Europe/Istanbul').tz_localize(None)
+        now_dt = now_ist.replace(tzinfo=None) if now_ist.tzinfo else now_ist
+        age_seconds = (now_dt - bar_dt.to_pydatetime()).total_seconds()
+        return 0 <= age_seconds <= 600
+
     def _save_single_trade(self, date_str: str, trade: dict):
         """Her AL/SAT aninda islemi veritabanina dogrudan yazar,
         boylece Telegram bildirimi giden her islem aninda Trade Log'da gorunur."""
+        # Tek cikis bacagi olan kapanmis islemlerde P&L'i fiyat/lot ve komisyon
+        # uzerinden yeniden hesapla; eski hesaplamadan kalan tutarsizligi tasima.
+        shares = int(trade.get('shares') or 0)
+        entry_price = float(trade.get('entry_price') or 0)
+        exit_price = float(trade.get('exit_price') or 0)
+        if trade.get('exit_time') and shares > 0 and entry_price > 0 and exit_price > 0:
+            buy_volume = shares * entry_price
+            sell_volume = shares * exit_price
+            net_pnl = shares * (exit_price - entry_price) - (buy_volume + sell_volume) * 0.0004
+            trade['pnl_val'] = net_pnl
+            trade['pnl_pct'] = net_pnl / buy_volume * 100 if buy_volume > 0 else 0.0
+            trade['realized_pnl'] = net_pnl
         conn = None
         try:
             conn = get_connection()
@@ -989,7 +1021,11 @@ class SimulationEngine:
                 sym = trade['symbol']
                 df = dfs[sym]
                 
-                if current_time not in df.index: continue
+                if current_time not in df.index:
+                    continue
+                # Bayat gerçek barlar ve sentetik interpolasyon barları satış tetiklemez.
+                if not self._is_trusted_market_bar(df, current_time, date_str):
+                    continue
                 
                 dt_current = current_time.tz_localize(None) if current_time.tzinfo else current_time
                 dt_entry = pd.to_datetime(trade['entry_time'])
@@ -1227,28 +1263,18 @@ class SimulationEngine:
                 if df is None or current_time not in df.index:
                     continue
 
-                # === VERI GUVENLIGI KALKANI (KRDMD/SKYMD hatasinin kok cozumu) ===
-                # 1) Sentetik (uydurma/interpolasyon) bar uzerinde ASLA pozisyon acilmaz.
-                _syn_times = df.attrs.get('synthetic_times')
-                if _syn_times and current_time in _syn_times:
+                # Bayat veya sentetik barlar hiçbir yeni işlem kararı üretemez.
+                if not self._is_trusted_market_bar(df, current_time, date_str):
+                    print(f"[SimEngine] STALE/SYNTHETIC DATA: {sym} {current_time} - giris atlandi")
                     continue
-                # 2) Tazelik: canlı günde barin yasi 10 dakikadan fazlaysa giris yapilmaz.
-                #    Yahoo gecikmesi / 429 ban korumasi sonrasi saatler oncesinden kalan
-                #    bayat barlarla islem acilmasini engeller.
-                try:
-                    from zoneinfo import ZoneInfo as _ZI
-                    _rt_now = datetime.now(_ZI('Europe/Istanbul')).replace(tzinfo=None)
-                except Exception:
-                    _rt_now = datetime.now()
-                if date_str == _rt_now.strftime('%Y-%m-%d'):
-                    _bar_age_min = (_rt_now - dt_current).total_seconds() / 60.0
-                    if _bar_age_min > 10.0:
-                        print(f"[SimEngine] STALE DATA: {sym} bar {dt_current} ({_bar_age_min:.0f} dk eski) - giris atlandi")
-                        continue
 
                 from datetime import datetime as _dt_cls
-                today_now_str = _dt_cls.now().strftime('%Y-%m-%d')
-                is_live_today = (date_str == today_now_str and current_time.time() < time(17, 30))
+                try:
+                    from zoneinfo import ZoneInfo as _ZI
+                    _now_local = _dt_cls.now(_ZI('Europe/Istanbul'))
+                except Exception:
+                    _now_local = _dt_cls.now()
+                is_live_today = (date_str == _now_local.strftime('%Y-%m-%d') and current_time.time() < time(17, 30))
                 remaining_bars = int((df.index > current_time).sum())
                 if not is_live_today and remaining_bars < 3:
                     to_remove.append(s)
@@ -1442,18 +1468,17 @@ class SimulationEngine:
             if df is not None and not df.empty:
                 last_time = df.index[-1]
                 close = float(df.iloc[-1]['Close'])
-                if close_open_now:
+                final_bar_trusted = self._is_trusted_market_bar(df, last_time, date_str, now)
+                if close_open_now and final_bar_trusted:
                     trade['status'] = 'CLOSED'
                     trade['exit_time'] = str(last_time)
-                    # End-of-day market exit includes conservative sell-side slippage.
                     eod_sell_price = round(close * 0.9985, 2)
-                    trade['exit_price'] = eod_sell_price
                     buy_volume = trade['shares'] * trade['entry_price']
                     sell_volume = trade['shares'] * eod_sell_price
                     buy_commission = buy_volume * 0.0004
                     sell_commission = sell_volume * 0.0004
-                    gross_pnl = trade['shares'] * (eod_sell_price - trade['entry_price'])
-                    trade['pnl_val'] = gross_pnl - buy_commission - sell_commission
+                    trade['exit_price'] = eod_sell_price
+                    trade['pnl_val'] = trade['shares'] * (eod_sell_price - trade['entry_price']) - buy_commission - sell_commission
                     trade['realized_pnl'] = trade['pnl_val']
                     current_cash += sell_volume - sell_commission
                     trade['pnl_pct'] = (trade['pnl_val'] / buy_volume * 100) if buy_volume > 0 else 0.0
@@ -1471,30 +1496,23 @@ class SimulationEngine:
                 else:
                     trade['exit_time'] = None
                     trade['exit_price'] = None
-                    buy_volume = trade['shares'] * trade['entry_price']
-                    gross_pnl = trade['shares'] * (close - trade['entry_price'])
-                    trade['pnl_val'] = gross_pnl
-                    trade['pnl_pct'] = (gross_pnl / buy_volume * 100) if buy_volume > 0 else 0.0
-                    trade['exit_reason'] = "⏳ ACIK POZISYON"
-                completed_trades.append(trade)
+                    if final_bar_trusted:
+                        buy_volume = trade['shares'] * trade['entry_price']
+                        gross_pnl = trade['shares'] * (close - trade['entry_price'])
+                        trade['pnl_val'] = gross_pnl
+                        trade['pnl_pct'] = (gross_pnl / buy_volume * 100) if buy_volume > 0 else 0.0
+                        trade['exit_reason'] = "⏳ ACIK POZISYON"
+                    else:
+                        trade['pnl_val'] = 0.0
+                        trade['pnl_pct'] = 0.0
+                        trade['exit_reason'] = "⚠️ VERİ BAYAT/GÜVENİLİR DEĞİL — POZİSYON AÇIK"
+                    completed_trades.append(trade)
             else:
-                if close_open_now:
-                    trade['status'] = 'CLOSED'
-                    trade['exit_time'] = f"{date_str} 18:00:00"
-                    trade['exit_price'] = trade['entry_price']
-                    trade['pnl_val'] = 0.0
-                    trade['realized_pnl'] = 0.0
-                    trade['pnl_pct'] = 0.0
-                    trade['exit_reason'] = 'SEANS SONU NAKITE GECIS (17:50)'
-                    trade['owner'] = self.owner
-                    trade['engine_version'] = trade.get('engine_version', 'V8_ELITE')
-                    self._save_single_trade(date_str, trade)
-                else:
-                    trade['exit_time'] = None
-                    trade['exit_price'] = None
-                    trade['pnl_val'] = 0.0
-                    trade['pnl_pct'] = 0.0
-                    trade['exit_reason'] = "⏳ ACIK POZISYON (Veri Bekleniyor)"
+                trade['exit_time'] = None
+                trade['exit_price'] = None
+                trade['pnl_val'] = 0.0
+                trade['pnl_pct'] = 0.0
+                trade['exit_reason'] = "⚠️ VERİ YOK — POZİSYON AÇIK"
                 completed_trades.append(trade)
 
         self._save_trades(date_str, completed_trades)
