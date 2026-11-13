@@ -4009,6 +4009,15 @@ def api_simulation_live_data():
         with get_connection() as conn:
             conn.row_factory = SmartRow
             c = conn.cursor()
+            # Bugune ait sinyal yoksa (gece / piyasa oncesi) son sinyal uretilen
+            # gune geri dus; tablo bos kalmasin, hangi gunun verisi oldugu gorunsun.
+            requested_date = date_str
+            c.execute("SELECT symbol FROM signals WHERE date_str=? LIMIT 1", (date_str,))
+            if not c.fetchone():
+                c.execute("SELECT date_str FROM signals ORDER BY date_str DESC LIMIT 1")
+                latest = c.fetchone()
+                if latest:
+                    date_str = latest['date_str']
             c.execute("SELECT symbol, score, morning_price, ceiling_target, metadata FROM signals WHERE date_str=? ORDER BY score DESC", (date_str,))
             sig_map = {}
             for r in c.fetchall():
@@ -4017,7 +4026,8 @@ def api_simulation_live_data():
                     _md = json.loads(d.get('metadata') or '{}')
                 except Exception:
                     _md = {}
-                d['_sig_change'] = _md.get('Change_Pct', _md.get('Change'))
+                d['_md'] = _md
+                d['_sig_change'] = _md.get('Daily_Change_Pct', _md.get('Change_Pct', _md.get('Change')))
                 sig_map[d['symbol']] = d
             c.execute("SELECT DISTINCT symbol FROM trades WHERE owner=? AND exit_time IS NULL", (owner,))
             open_syms = [r['symbol'] for r in c.fetchall()]
@@ -4030,10 +4040,18 @@ def api_simulation_live_data():
                 c.execute("SELECT timestamp, close, source FROM market_data WHERE date_str=? AND symbol=? AND interval='5m' ORDER BY timestamp DESC LIMIT 1", (date_str, sym))
                 bar = c.fetchone()
                 if not bar:
+                    # 5dk bar yoksa sinyal anindaki fiyat/metadata ile goster;
+                    # satir bos kalmasin, kaynagi acikca etiketlensin.
+                    _md = sig.get('_md') or {}
+                    snap_p = float(_md.get('Price') or 0)
+                    sig_ch = float(sig.get('_sig_change') or 0)
                     rows.append({
                         "symbol": sym, "score": sig.get('score'), "signal_change": round(sig_ch, 2),
-                        "last_price": None, "bar_time": None, "age_min": None, "source": None,
-                        "status": "VERİ YOK", "has_position": sym in open_syms
+                        "last_price": round(snap_p, 2) if snap_p > 0 else None,
+                        "live_change": round(sig_ch, 2) if sig_ch else None,
+                        "bar_time": None, "age_min": None, "source": "sinyal anlık fiyatı",
+                        "status": "SEANS DIŞI" if not in_session else "5M VERİ YOK",
+                        "has_position": sym in open_syms
                     })
                     continue
                 last_close = float(bar['close'])
@@ -4066,7 +4084,11 @@ def api_simulation_live_data():
                     "status": status, "has_position": sym in open_syms
                 })
         rows.sort(key=lambda r: (r.get("age_min") is None, r.get("age_min") or 0))
-        return jsonify({"status": "success", "date": date_str, "server_time": now_ist.strftime("%H:%M:%S"), "symbols": rows})
+        return jsonify({
+            "status": "success", "date": date_str, "requested_date": requested_date,
+            "is_fallback": requested_date != date_str,
+            "server_time": now_ist.strftime("%H:%M:%S"), "symbols": rows
+        })
     except Exception as e:
         logging.exception("api_simulation_live_data error")
         return jsonify({"status": "error", "message": str(e)}), 500

@@ -5835,9 +5835,18 @@ async function loadSimLiveData() {
         const data = await res.json();
         const timeEl = document.getElementById('sim-live-server-time');
         if (timeEl && data.server_time) timeEl.textContent = data.server_time;
+        const dateEl = document.getElementById('sim-live-data-date');
+        if (dateEl) {
+            if (data.is_fallback) {
+                const d = (data.date || '').split('-').reverse().join('.');
+                dateEl.innerHTML = ` <span style="color:#f59e0b; font-weight:800;">· ${escapeHtml(d)} verisi gösteriliyor (bugünün sinyali henüz üretilmedi)</span>`;
+            } else {
+                dateEl.textContent = '';
+            }
+        }
         const rows = data.symbols || [];
         if (!rows.length) {
-            tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; color:var(--text-muted); padding:14px;">Bugün için değerlendirilen sembol bulunamadı.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; color:var(--text-muted); padding:14px;">Değerlendirilen sembol bulunamadı.</td></tr>';
             return;
         }
         tbody.innerHTML = rows.map(r => {
@@ -5845,7 +5854,8 @@ async function loadSimLiveData() {
             const chColor = ch == null ? 'var(--text-muted)' : (ch >= 0 ? '#10b981' : '#ef4444');
             const chTxt = ch == null ? '-' : (ch >= 0 ? '+' : '') + ch.toFixed(2) + '%';
             const sigTxt = r.signal_change == null ? '-' : (r.signal_change >= 0 ? '+' : '') + Number(r.signal_change).toFixed(2) + '%';
-            const statusColor = r.status === 'TAZE' ? '#10b981' : (r.status === 'GECİKMELİ' ? '#f59e0b' : (r.status === 'BAYAT' ? '#ef4444' : 'var(--text-muted)'));
+            const statusColors = { 'TAZE': '#10b981', 'GECİKMELİ': '#f59e0b', 'BAYAT': '#ef4444', 'VERİ YOK': '#ef4444', '5M VERİ YOK': '#f59e0b', 'SEANS DIŞI': '#94a3b8', 'KAPALI': '#94a3b8' };
+            const statusColor = statusColors[r.status] || 'var(--text-muted)';
             const ageTxt = r.age_min == null ? '-' : r.age_min.toFixed(0) + ' dk';
             const ageColor = r.age_min == null ? 'var(--text-muted)' : (r.age_min <= 10 ? '#10b981' : (r.age_min <= 30 ? '#f59e0b' : '#ef4444'));
             const posBadge = r.has_position ? ' <span style="font-size:0.65rem; background:rgba(16,185,129,0.2); color:#10b981; padding:1px 6px; border-radius:8px; border:1px solid rgba(16,185,129,0.4);">POZİSYON</span>' : '';
